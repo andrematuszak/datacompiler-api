@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datacompiler-api"
+version = "0.1.0"
+description = "Fast preview diagnostics for the DataCompiler website"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "python-multipart>=0.0.9",
+  "PyMuPDF>=1.24",
+  "Pillow>=10.0",
+  "langdetect>=1.0.9",
+]
+
+[project.optional-dependencies]
+translation = ["deepl>=1.26.0"]
+paddle-ocr = ["paddlepaddle", "paddleocr"]
+dev = ["pytest>=7.0", "httpx>=0.27"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+datacompiler_api = ["assets/fonts/*.ttf", "assets/fonts/*.txt", "assets/*.swift"]
