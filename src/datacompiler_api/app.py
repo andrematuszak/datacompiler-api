@@ -105,7 +105,6 @@ def _native_words(page) -> list[dict]:
         if not text.strip() or x1 <= x0 or y1 <= y0:
             continue
         words.append({
-            "text": text,
             "x": max(0.0, min(1.0, x0 / bounds.width)),
             "y": max(0.0, min(1.0, y0 / bounds.height)),
             "width": max(0.0, min(1.0, (x1 - x0) / bounds.width)),
@@ -265,7 +264,9 @@ def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool
             estimated_words = page_words * page_count if page_count > 1 else page_words
             source_code = _detect_language(page_text)
             source_name = LANGUAGE_NAMES.get(source_code, source_code or "Unknown")
-            targets = _target_languages(source_code)
+            # Native-text PDFs keep using the existing faithful rebuild path for
+            # now; do not spend DeepL calls on a preview the website will not use.
+            targets = _target_languages(source_code) if mode == "scan" else []
             sample = source_lines[0] if source_lines else ""
             _render_text_preview(source_lines, job_dir / "source-text.png", width, height)
             diagnostic_bytes = path.stat().st_size
