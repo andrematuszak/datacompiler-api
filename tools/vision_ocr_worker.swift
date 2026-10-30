@@ -1,6 +1,13 @@
 import Foundation
 import Vision
 
+func writeResponse(_ response: [String: Any]) throws {
+    let data = try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys])
+    var line = data
+    line.append(0x0A)
+    FileHandle.standardOutput.write(line)
+}
+
 struct Input: Decodable {
     let image_path: String
     let language: String?
@@ -47,11 +54,9 @@ while let line = readLine() {
             "granularity": "line",
             "elapsed_ms": Date().timeIntervalSince(started) * 1000.0
         ]
-        let data = try JSONSerialization.data(withJSONObject: output, options: [.sortedKeys])
-        print(String(data: data, encoding: .utf8) ?? "{}")
+        try writeResponse(output)
     } catch {
         let output = ["error": String(describing: error)]
-        let data = try JSONSerialization.data(withJSONObject: output, options: [.sortedKeys])
-        print(String(data: data, encoding: .utf8) ?? "{}")
+        try? writeResponse(output)
     }
 }

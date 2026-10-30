@@ -156,16 +156,19 @@ downloadable artifacts.
   still need to be benchmarked on the Mac that hosts the tunnel.
 - `datacompiler-api` now has an initial FastAPI diagnostic vertical slice:
   first-page rendering, native-text extraction, normalized boxes, macOS Vision
-  OCR worker, optional two-language first-line translation, and blurred teaser
-  PNGs. Its worker and package data are kept together so an installed build can
-  locate the helper and Polish-capable font.
+  OCR worker, optional two-language first-line translation, blurred teaser
+  PNGs, and an optional word-highlight GIF. Its worker and package data are kept
+  together so an installed build can locate the helper and Polish-capable font.
 - The diagnostic endpoint now publishes a `preview_ready` response as soon as
   OCR and rendering finish, before waiting for the translation providers; each
   target sample is added as it completes.
-- This runtime is a prototype. The Mac Vision helper and the complete upload →
-  preview flow have not been validated on the tunnel host, and the live web
-  frontend still calls the existing `datacompiler-core` routes.
+- The frontend now calls the diagnostic API for scan PDFs, renders the original
+  and its OCR animation beside each other, and alternates the translation PNGs.
+  Native-text PDFs continue to use the existing full-processing API.
+- The tunnel health and OpenAPI routes were confirmed reachable from the
+  website's configured Cloudflare origin. A live `polish.pdf` diagnostic was
+  accepted but remained `processing` before publishing `preview_ready`, so the
+  Vision worker response protocol is being hardened before this route is ready.
 - Still missing: measured scan OCR benchmark, verified output-size estimates,
-  a production OCR fallback, frontend consumption of staged updates, frontend
-  API integration, real OCR animation/arrows, multi-select controls, price
+  a production OCR fallback, verified live GIF generation, multi-select controls, price
   calculation for sets, and post-purchase full-output jobs.

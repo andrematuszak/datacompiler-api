@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import importlib.util
+import select
 import shutil
 import subprocess
 import tempfile
@@ -35,6 +37,7 @@ JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
 VISION_LOCK = threading.Lock()
 VISION_PROCESS: subprocess.Popen | None = None
+VISION_RESPONSE_TIMEOUT_SECONDS = 30
 
 LANGUAGE_NAMES = {
     "de": "German", "en": "English", "fr": "French", "it": "Italian",
@@ -45,7 +48,16 @@ TARGET_PRIORITY = ["en", "fr", "de"]
 
 @app.get("/health")
 def health():
-    return {"status": "online", "service": "datacompiler-api", "version": app.version}
+    return {
+        "status": "online",
+        "service": "datacompiler-api",
+        "version": app.version,
+        "capabilities": {
+            "vision_compiler_available": shutil.which("swiftc") is not None,
+            "gif_engine_available": importlib.util.find_spec("cv2") is not None,
+            "translation_configured": bool(os.getenv("DEEPL_AUTH_KEY")),
+        },
+    }
 
 
 def purge_old_jobs() -> None:
@@ -73,7 +85,7 @@ def _vision_worker() -> subprocess.Popen:
         binary = JOBS_DIR / "vision-ocr-worker"
         compiled = subprocess.run(
             [swiftc, str(helper), "-o", str(binary)],
-            capture_output=True, text=True, timeout=60, check=False,
+            capture_output=True, text=True, timeout=20, check=False,
         )
         if compiled.returncode:
             raise RuntimeError("The local Vision OCR helper could not be compiled.")
@@ -87,11 +99,22 @@ def _vision_worker() -> subprocess.Popen:
 def _scan_ocr(image_path: Path, language: str = "") -> dict:
     import json
 
+    global VISION_PROCESS
     worker = _vision_worker()
     with VISION_LOCK:
         worker.stdin.write(json.dumps({"image_path": str(image_path), "language": language}) + "\n")
         worker.stdin.flush()
-        result = json.loads(worker.stdout.readline())
+        ready, _, _ = select.select([worker.stdout], [], [], VISION_RESPONSE_TIMEOUT_SECONDS)
+        if not ready:
+            worker.kill()
+            worker.wait(timeout=3)
+            VISION_PROCESS = None
+            raise TimeoutError(f"Vision OCR did not answer within {VISION_RESPONSE_TIMEOUT_SECONDS} seconds.")
+        line = worker.stdout.readline()
+        if not line:
+            VISION_PROCESS = None
+            raise RuntimeError("The Vision OCR worker exited without returning a response.")
+        result = json.loads(line)
     if result.get("error"):
         raise RuntimeError(result["error"])
     return result
@@ -229,6 +252,13 @@ def _render_target_preview(sample: str, output: Path, width: int, height: int) -
     image.save(output, format="PNG")
 
 
+def _set_job_stage(job_id: str, stage: str) -> None:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job and job.get("status") == "processing":
+            job["stage"] = stage
+
+
 ANIMATION_WIDTH = 400          # the GIF is computed on a small copy of the page
 ANIMATION_MAX_FRAMES = 60      # many words are grouped so the GIF stays light
 
@@ -333,10 +363,11 @@ def _animate_scan(job_id: str, png_path: Path, gif_path: Path, result: dict) -> 
 
 
 def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool) -> None:
-    import pymupdf
-
     job_dir = JOBS_DIR / job_id
     try:
+        import pymupdf
+
+        _set_job_stage(job_id, "opening")
         with pymupdf.open(path) as doc:
             page_count = len(doc)
             page = doc[0]
@@ -346,6 +377,7 @@ def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool
             pix.save(str(preview))
             width, height = pix.width, pix.height
             native = _native_words(page)
+            _set_job_stage(job_id, "extracting_text" if native else "ocr")
             page_text = ""
             granularity = "word"
             if native:
@@ -370,6 +402,7 @@ def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool
             # Native-text PDFs keep using the existing faithful rebuild path for
             # now; do not spend DeepL calls on a preview the website will not use.
             targets = _target_languages(source_code) if mode == "scan" else []
+            _set_job_stage(job_id, "preparing_preview")
             sample = source_lines[0] if source_lines else ""
             _render_text_preview(source_lines, job_dir / "source-text.png", width, height)
             diagnostic_bytes = path.stat().st_size
@@ -413,6 +446,7 @@ def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool
                 animation_thread = threading.Thread(
                     target=_animate_scan, args=(job_id, preview, job_dir / "scan-anim.gif", result), daemon=True)
                 animation_thread.start()
+            _set_job_stage(job_id, "translation")
             # Publish OCR, boxes, and the source preview before waiting on
             # translation providers. Each language is added as it finishes.
             for target in targets:
@@ -439,8 +473,13 @@ def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool
         path.unlink(missing_ok=True)
     except Exception as exc:  # noqa: BLE001 - expose safe status; keep details server-side
         print("Diagnostic failed:", job_id, repr(exc))
+        message = (
+            "OCR worker timed out. Check that the Vision worker can return a response."
+            if isinstance(exc, TimeoutError)
+            else "The document could not be diagnosed. Check the API server log."
+        )
         with JOBS_LOCK:
-            JOBS[job_id] = {"status": "error", "message": "The document could not be diagnosed."}
+            JOBS[job_id] = {"status": "error", "message": message}
         path.unlink(missing_ok=True)
 
 
@@ -484,7 +523,7 @@ async def create_diagnostic(
             first_page_only = False
 
     with JOBS_LOCK:
-        JOBS[job_id] = {"status": "processing"}
+            JOBS[job_id] = {"status": "processing", "stage": "queued"}
     threading.Thread(target=_process, args=(job_id, path, len(data), first_page_only), daemon=True).start()
     return {"job_id": job_id, "status": "processing"}
 
@@ -498,6 +537,8 @@ def get_diagnostic(job_id: str):
     if job.get("result"):
         return job["result"]
     response = {"job_id": job_id, "status": job["status"]}
+    if job.get("stage"):
+        response["stage"] = job["stage"]
     if job.get("message"):
         response["message"] = job["message"]
     return response

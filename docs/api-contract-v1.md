@@ -24,6 +24,10 @@ after translation samples are available. It may also return `error`. The
 incrementally and `translation_status` indicates `processing`, `ready`, or
 `unavailable`:
 
+While still processing, the response includes a `stage` such as `opening`,
+`ocr`, `preparing_preview`, or `translation`, so the upload screen can show
+what the server is doing.
+
 ```json
 {
   "schema_version": 1,

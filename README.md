@@ -26,7 +26,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[translation]'
 export DEEPL_AUTH_KEY='your-server-side-key'
-uvicorn datacompiler_api.app:app --host 127.0.0.1 --port 8001
+uvicorn datacompiler_api.app:app --host 127.0.0.1 --port 8000
 ```
 
 The prototype accepts PDF, PNG, and JPEG uploads at `POST /v1/diagnostics` and
