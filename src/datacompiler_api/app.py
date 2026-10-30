@@ -19,8 +19,7 @@ app.add_middleware(
     allow_origins=[
         "https://data-compiler.com",
         "https://www.data-compiler.com",
-        "http://localhost:3000",
-        "https://corporations-incl-stability-taste.trycloudflare.com
+        "http://localhost:3000"
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST"],
