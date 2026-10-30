@@ -20,6 +20,7 @@ app.add_middleware(
         "https://data-compiler.com",
         "https://www.data-compiler.com",
         "http://localhost:3000",
+        "https://corporations-incl-stability-taste.trycloudflare.com
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST"],
@@ -229,6 +230,109 @@ def _render_target_preview(sample: str, output: Path, width: int, height: int) -
     image.save(output, format="PNG")
 
 
+ANIMATION_WIDTH = 400          # the GIF is computed on a small copy of the page
+ANIMATION_MAX_FRAMES = 60      # many words are grouped so the GIF stays light
+
+
+def _word_contours(image, min_area: int = 50, margin: int = 15) -> list:
+    """Word-like blobs of a scan, in reading order (letters are merged horizontally)."""
+    import cv2
+    import numpy as np
+
+    bgr = np.array(image.convert("RGB"))[:, :, ::-1]
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
+    merged = cv2.dilate(binary, kernel, iterations=1)
+    contours, _ = cv2.findContours(merged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    height, width = bgr.shape[:2]
+    good = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if cv2.contourArea(contour) < min_area:
+            continue
+        if w > 0.8 * width or h > 0.8 * height:
+            continue
+        if y < margin or y + h > height - margin:   # ruled lines / page edges
+            continue
+        good.append(contour)
+
+    boxes = [cv2.boundingRect(c) for c in good]
+    row_tolerance = int(np.median([b[3] for b in boxes]) * 0.6) if boxes else 10
+
+    def line_of(box):
+        return round(box[1] / row_tolerance) if row_tolerance > 0 else 0
+
+    ordered = sorted(zip(good, boxes), key=lambda pair: (line_of(pair[1]), pair[1][0]))
+    return [pair[0] for pair in ordered]
+
+
+def _glow_patch(contour, size: tuple[int, int], color=(57, 255, 20), radius: int = 2, alpha: int = 180):
+    """Fluorescent outline of one word, computed on a small crop. Returns (patch, (x, y))."""
+    import cv2
+    from PIL import Image, ImageDraw, ImageFilter
+
+    width, height = size
+    x, y, w, h = cv2.boundingRect(contour)
+    pad = radius * 3 + 2
+    x0, y0 = max(0, x - pad), max(0, y - pad)
+    x1, y1 = min(width, x + w + pad), min(height, y + h + pad)
+    mask = Image.new("L", (x1 - x0, y1 - y0), 0)
+    points = [(int(px) - x0, int(py) - y0) for px, py in contour[:, 0, :]]
+    if len(points) >= 3:
+        ImageDraw.Draw(mask).polygon(points, outline=255)
+    mask = mask.filter(ImageFilter.MaxFilter(radius * 2 + 1))
+    patch = Image.new("RGBA", mask.size, (0, 0, 0, 0))
+    patch.paste(color + (alpha,), (0, 0, mask.width, mask.height), mask)
+    return patch.filter(ImageFilter.GaussianBlur(radius)), (x0, y0)
+
+
+def _write_scan_animation(png_path: Path, gif_path: Path) -> int:
+    """Highlight the words of the scan one after the other; the GIF plays once and stays lit."""
+    import math
+
+    from PIL import Image
+
+    base = Image.open(png_path).convert("RGB")
+    if base.width > ANIMATION_WIDTH:
+        ratio = ANIMATION_WIDTH / base.width
+        base = base.resize((ANIMATION_WIDTH, int(base.height * ratio)), Image.LANCZOS)
+    contours = _word_contours(base)
+    if not contours:
+        raise RuntimeError("No words detected for the animation.")
+
+    group = max(1, math.ceil(len(contours) / ANIMATION_MAX_FRAMES))
+    canvas = base.convert("RGBA")
+    frames = [canvas.copy()]
+    for start in range(0, len(contours), group):
+        for contour in contours[start:start + group]:
+            patch, position = _glow_patch(contour, base.size)
+            canvas.alpha_composite(patch, dest=position)
+        frames.append(canvas.copy())
+
+    # One shared palette keeps the GIF small (frames then differ only where a word lights up).
+    palette = frames[-1].convert("RGB").quantize(colors=96, method=Image.Quantize.MEDIANCUT)
+    indexed = [frame.convert("RGB").quantize(palette=palette, dither=Image.Dither.NONE) for frame in frames]
+    step = 150 if len(frames) <= 40 else 100
+    durations = [step] * (len(indexed) - 1) + [1500]
+    # No "loop" extension: browsers play the GIF once and keep the last frame.
+    indexed[0].save(gif_path, save_all=True, append_images=indexed[1:], duration=durations, optimize=True)
+    return len(contours)
+
+
+def _animate_scan(job_id: str, png_path: Path, gif_path: Path, result: dict) -> None:
+    try:
+        words = _write_scan_animation(png_path, gif_path)
+        print(f"Scan animation ready for {job_id}: {words} words")
+        update = {"animation_status": "ready", "animation_gif_url": f"/v1/diagnostics/{job_id}/scan-anim.gif"}
+    except Exception as exc:  # noqa: BLE001 - the website falls back to static OCR boxes
+        print("Scan animation failed:", job_id, repr(exc))
+        update = {"animation_status": "unavailable"}
+    with JOBS_LOCK:
+        result["preview"].update(update)   # keys already exist: safe while the result is being served
+
+
 def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool) -> None:
     import pymupdf
 
@@ -291,6 +395,8 @@ def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool
                     "height": height,
                     "box_granularity": granularity,
                     "word_boxes": boxes,
+                    "animation_status": "processing" if mode == "scan" else "unavailable",
+                    "animation_gif_url": None,
                 },
                 "translations": [],
                 "translation_status": "processing",
@@ -303,6 +409,11 @@ def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool
             }
             with JOBS_LOCK:
                 JOBS[job_id] = {"status": "preview_ready", "result": result}
+            animation_thread = None
+            if mode == "scan":
+                animation_thread = threading.Thread(
+                    target=_animate_scan, args=(job_id, preview, job_dir / "scan-anim.gif", result), daemon=True)
+                animation_thread.start()
             # Publish OCR, boxes, and the source preview before waiting on
             # translation providers. Each language is added as it finishes.
             for target in targets:
@@ -317,6 +428,11 @@ def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool
                     })
                     with JOBS_LOCK:
                         JOBS[job_id]["result"] = dict(result)
+            if animation_thread:
+                animation_thread.join(timeout=90)
+                with JOBS_LOCK:
+                    if result["preview"]["animation_status"] == "processing":
+                        result["preview"]["animation_status"] = "unavailable"
             result["translation_status"] = "ready" if result["translations"] else "unavailable"
             result["status"] = "done"
             with JOBS_LOCK:
@@ -390,7 +506,7 @@ def get_diagnostic(job_id: str):
 
 @app.get("/v1/diagnostics/{job_id}/{artifact_name}")
 def get_artifact(job_id: str, artifact_name: str):
-    allowed = {"original.png", "source-text.png"}
+    allowed = {"original.png", "source-text.png", "scan-anim.gif"}
     if artifact_name.startswith("target-") and artifact_name.endswith(".png"):
         allowed.add(artifact_name)
     if artifact_name not in allowed:
@@ -398,4 +514,5 @@ def get_artifact(job_id: str, artifact_name: str):
     path = JOBS_DIR / Path(job_id).name / artifact_name
     if not path.is_file():
         raise HTTPException(status_code=404)
-    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "private, no-store"})
+    media_type = "image/gif" if artifact_name.endswith(".gif") else "image/png"
+    return FileResponse(path, media_type=media_type, headers={"Cache-Control": "private, no-store"})
