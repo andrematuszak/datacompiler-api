@@ -72,6 +72,10 @@ def purge_old_jobs() -> None:
             pass
 
 
+VISION_COMPILE_TIMEOUT_SECONDS = 120
+VISION_CACHE_DIR = Path.home() / ".cache" / "datacompiler-api"
+
+
 def _vision_worker() -> subprocess.Popen:
     """Start the persistent macOS Vision helper once per API process."""
     global VISION_PROCESS
@@ -82,13 +86,23 @@ def _vision_worker() -> subprocess.Popen:
         if not swiftc:
             raise RuntimeError("No scan OCR provider is available on this server.")
         helper = Path(__file__).parent / "assets" / "vision_ocr_worker.swift"
-        binary = JOBS_DIR / "vision-ocr-worker"
-        compiled = subprocess.run(
-            [swiftc, str(helper), "-o", str(binary)],
-            capture_output=True, text=True, timeout=20, check=False,
-        )
-        if compiled.returncode:
-            raise RuntimeError("The local Vision OCR helper could not be compiled.")
+        VISION_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        binary = VISION_CACHE_DIR / "vision-ocr-worker"
+        # Compile only when the binary is missing or older than the Swift source.
+        if not binary.exists() or binary.stat().st_mtime < helper.stat().st_mtime:
+            print("Compiling the Vision OCR helper...")
+            started = time.perf_counter()
+            try:
+                compiled = subprocess.run(
+                    [swiftc, str(helper), "-o", str(binary)],
+                    capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                    timeout=VISION_COMPILE_TIMEOUT_SECONDS, check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise TimeoutError(f"swiftc did not finish within {VISION_COMPILE_TIMEOUT_SECONDS} s.") from exc
+            print(f"Vision OCR helper compiled in {time.perf_counter() - started:.1f}s")
+            if compiled.returncode:
+                raise RuntimeError("The local Vision OCR helper could not be compiled: " + compiled.stderr[-300:])
         VISION_PROCESS = subprocess.Popen(
             [str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, bufsize=1,
