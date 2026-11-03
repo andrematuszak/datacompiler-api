@@ -441,7 +441,7 @@ def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool
                     "height": height,
                     "box_granularity": granularity,
                     "word_boxes": boxes,
-                    "animation_status": "processing",
+                    "animation_status": "processing" if mode == "scan" else "unavailable",
                     "animation_gif_url": None,
                 },
                 "translations": [],
@@ -455,11 +455,11 @@ def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool
             }
             with JOBS_LOCK:
                 JOBS[job_id] = {"status": "preview_ready", "result": result}
-            # Scan and native pages both get the word-highlight GIF (native lines can span the page).
-            animation_thread = threading.Thread(
-                target=_animate_scan, args=(job_id, preview, job_dir / "scan-anim.gif", result, 0.98 if mode == "native" else 0.8),
-                daemon=True)
-            animation_thread.start()
+            animation_thread = None
+            if mode == "scan":   # native pages are highlighted from the pipeline's own words (see the website)
+                animation_thread = threading.Thread(
+                    target=_animate_scan, args=(job_id, preview, job_dir / "scan-anim.gif", result), daemon=True)
+                animation_thread.start()
             _set_job_stage(job_id, "translation")
             # Publish OCR, boxes, and the source preview before waiting on
             # translation providers. Each language is added as it finishes.
