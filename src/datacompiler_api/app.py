@@ -277,7 +277,7 @@ ANIMATION_WIDTH = 400          # the GIF is computed on a small copy of the page
 ANIMATION_MAX_FRAMES = 60      # many words are grouped so the GIF stays light
 
 
-def _word_contours(image, min_area: int = 50, margin: int = 15) -> list:
+def _word_contours(image, min_area: int = 50, margin: int = 15, max_ratio: float = 0.8) -> list:
     """Word-like blobs of a scan, in reading order (letters are merged horizontally)."""
     import cv2
     import numpy as np
@@ -295,7 +295,7 @@ def _word_contours(image, min_area: int = 50, margin: int = 15) -> list:
         x, y, w, h = cv2.boundingRect(contour)
         if cv2.contourArea(contour) < min_area:
             continue
-        if w > 0.8 * width or h > 0.8 * height:
+        if w > max_ratio * width or h > 0.8 * height:
             continue
         if y < margin or y + h > height - margin:   # ruled lines / page edges
             continue
@@ -331,7 +331,7 @@ def _glow_patch(contour, size: tuple[int, int], color=(57, 255, 20), radius: int
     return patch.filter(ImageFilter.GaussianBlur(radius)), (x0, y0)
 
 
-def _write_scan_animation(png_path: Path, gif_path: Path) -> int:
+def _write_scan_animation(png_path: Path, gif_path: Path, max_ratio: float = 0.8) -> int:
     """Highlight the words of the scan one after the other; the GIF plays once and stays lit."""
     import math
 
@@ -341,7 +341,7 @@ def _write_scan_animation(png_path: Path, gif_path: Path) -> int:
     if base.width > ANIMATION_WIDTH:
         ratio = ANIMATION_WIDTH / base.width
         base = base.resize((ANIMATION_WIDTH, int(base.height * ratio)), Image.LANCZOS)
-    contours = _word_contours(base)
+    contours = _word_contours(base, max_ratio=max_ratio)
     if not contours:
         raise RuntimeError("No words detected for the animation.")
 
@@ -364,9 +364,9 @@ def _write_scan_animation(png_path: Path, gif_path: Path) -> int:
     return len(contours)
 
 
-def _animate_scan(job_id: str, png_path: Path, gif_path: Path, result: dict) -> None:
+def _animate_scan(job_id: str, png_path: Path, gif_path: Path, result: dict, max_ratio: float = 0.8) -> None:
     try:
-        words = _write_scan_animation(png_path, gif_path)
+        words = _write_scan_animation(png_path, gif_path, max_ratio)
         print(f"Scan animation ready for {job_id}: {words} words")
         update = {"animation_status": "ready", "animation_gif_url": f"/v1/diagnostics/{job_id}/scan-anim.gif"}
     except Exception as exc:  # noqa: BLE001 - the website falls back to static OCR boxes
@@ -441,7 +441,7 @@ def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool
                     "height": height,
                     "box_granularity": granularity,
                     "word_boxes": boxes,
-                    "animation_status": "processing" if mode == "scan" else "unavailable",
+                    "animation_status": "processing",
                     "animation_gif_url": None,
                 },
                 "translations": [],
@@ -455,11 +455,11 @@ def _process(job_id: str, path: Path, uploaded_bytes: int, first_page_only: bool
             }
             with JOBS_LOCK:
                 JOBS[job_id] = {"status": "preview_ready", "result": result}
-            animation_thread = None
-            if mode == "scan":
-                animation_thread = threading.Thread(
-                    target=_animate_scan, args=(job_id, preview, job_dir / "scan-anim.gif", result), daemon=True)
-                animation_thread.start()
+            # Scan and native pages both get the word-highlight GIF (native lines can span the page).
+            animation_thread = threading.Thread(
+                target=_animate_scan, args=(job_id, preview, job_dir / "scan-anim.gif", result, 0.98 if mode == "native" else 0.8),
+                daemon=True)
+            animation_thread.start()
             _set_job_stage(job_id, "translation")
             # Publish OCR, boxes, and the source preview before waiting on
             # translation providers. Each language is added as it finishes.
