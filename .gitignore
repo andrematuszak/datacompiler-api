@@ -3,4 +3,5 @@
 *.pyc
 .DS_Store
 .env
+.mypy_cache*
 node_modules/
